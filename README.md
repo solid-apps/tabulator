@@ -30,19 +30,40 @@ A small recursive-descent evaluator (no `eval`), cycle-guarded (`#CYCLE`):
   until the value arrives, then recompute. Errors surface as `#REF` `#VAL`
   `#NAME` `#CYCLE` `#404` `#PRED`.
 
-## Data model
+## Data model — every cell is an addressable URI
 
 One JSON-LD doc per sheet, registered in your TypeIndex as
-`urn:solid:Spreadsheet` so `hub`/`pilot` can discover it:
+`urn:solid:Spreadsheet` so `hub`/`pilot` can discover it. **Each non-empty cell
+is its own fragment subject** (`#A1`, `#B5`, …) — closer to TimBL's Tabulator,
+where things and values are dereferenceable. A cell carries:
+
+- `rdf:value` — the **materialised value** other sheets/apps dereference;
+- `tab:src` — the **raw input** (literal or formula) the app reloads for editing.
 
 ```
 /public/sheet/<slug>.jsonld
-{ "@context": {"schema":"https://schema.org/","urn":"urn:solid:"},
-  "@id":"#this", "@type":"urn:Spreadsheet", "schema:name":"…",
-  "cols":26, "rows":100,
-  "cells": { "A1":"Item", "B1":"Price", "B5":"=SUM(B2:B4)",
-             "B2":"=GET(\"https://…#thing\",\"schema:price\")" } }
+{ "@context": {"schema":"https://schema.org/","urn":"urn:solid:",
+               "rdf":"http://www.w3.org/1999/02/22-rdf-syntax-ns#","tab":"urn:solid:tabulator#"},
+  "@graph": [
+    { "@id":"#this", "@type":"urn:Spreadsheet", "schema:name":"…", "cols":26, "rows":100 },
+    { "@id":"#A1", "rdf:value":"Item",          "tab:src":"Item" },
+    { "@id":"#B5", "rdf:value":420,             "tab:src":"=SUM(B2:B4)" }
+  ] }
 ```
+
+### Reference one sheet from another
+Because each cell is a URI, a cell in *this* sheet can pull a cell from *another*:
+
+```
+=GET("https://my.pod/public/sheet/budget.jsonld#B5")          ← defaults to that cell's rdf:value
+=GET("https://my.pod/public/sheet/budget.jsonld#B5","rdf:value")
+```
+
+So sheets compose into a web of live figures (and any app can read a cell, or
+write `rdf:value` for tabulator to display). **Freshness caveat (v1):** the
+referenced `rdf:value` is the *last-saved* materialisation of that cell — it
+refreshes when the source sheet is re-opened/saved, not instantly across sheets.
+Live cross-sheet recalculation is a follow-up.
 
 ## Use
 

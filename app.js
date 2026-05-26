@@ -19,13 +19,15 @@ const COLS = 26, ROWS = 100
 const SHEET_CLASS = 'urn:solid:Spreadsheet'
 const SOLID_NS = 'http://www.w3.org/ns/solid/terms#'
 const PIM_NS = 'http://www.w3.org/ns/pim/space#'
+const RDF_NS = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'
+const TAB_NS = 'urn:solid:tabulator#'
 const PREFIXES = {
   schema: 'https://schema.org/', foaf: 'http://xmlns.com/foaf/0.1/',
   vcard: 'http://www.w3.org/2006/vcard/ns#', ical: 'http://www.w3.org/2002/12/cal/ical#',
   dc: 'http://purl.org/dc/elements/1.1/', dcterms: 'http://purl.org/dc/terms/',
   ldp: 'http://www.w3.org/ns/ldp#', acl: 'http://www.w3.org/ns/auth/acl#',
   wf: 'http://www.w3.org/2005/01/wf/flow#', as: 'https://www.w3.org/ns/activitystreams#',
-  bookmark: 'http://www.w3.org/2002/01/bookmark#', rdfs: 'http://www.w3.org/2000/01/rdf-schema#'
+  bookmark: 'http://www.w3.org/2002/01/bookmark#', rdf: RDF_NS, rdfs: 'http://www.w3.org/2000/01/rdf-schema#'
 }
 
 const authFetch = (url, opts) => ((window.xlogin && window.xlogin.authFetch) || fetch)(url, opts)
@@ -37,7 +39,7 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&':
 // pod helpers (ported from hub/camera)
 // =====================================================================
 const idOf = (v) => typeof v === 'string' ? v : (v && v['@id']) || null
-function valueOf(v) { if (v == null) return null; if (typeof v === 'string') return v; if (Array.isArray(v)) return v.length ? valueOf(v[0]) : null; return v['@value'] ?? v['@id'] ?? null }
+function valueOf(v) { if (v == null) return null; if (typeof v !== 'object') return v; if (Array.isArray(v)) return v.length ? valueOf(v[0]) : null; return v['@value'] ?? v['@id'] ?? null }
 function isHttpUrl(s) { try { const u = new URL(s); return u.protocol === 'http:' || u.protocol === 'https:' } catch { return false } }
 function parseLoose(s) { try { return JSON.parse(s) } catch { try { return JSON.parse(s.replace(/,(\s*[\}\]])/g, '$1')) } catch (e) { throw new Error('JSON-LD parse') } } }
 function findSubject(doc, frag) { const g = Array.isArray(doc['@graph']) ? doc['@graph'] : Array.isArray(doc) ? doc : [doc]; if (frag) { const m = g.find((n) => (n['@id'] || '').endsWith('#' + frag)); if (m) return m } return g[0] || {} }
@@ -199,7 +201,7 @@ async function kickGet(uri, pred) {
     const docUrl = uri.replace(/#.*$/, '')
     const doc = await getJsonLd(docUrl)
     if (!doc) { GET_CACHE.set(key, '#404'); }
-    else if (!pred) { GET_CACHE.set(key, uri) }   // no predicate → echo the URI
+    else if (!pred) { const subj = findSubject(doc, uri.includes('#') ? uri.split('#')[1] : null); const v = valueOf(subj['rdf:value'] ?? subj[RDF_NS + 'value']); GET_CACHE.set(key, v != null ? v : uri) }   // no predicate → the cell value (rdf:value), else echo the URI
     else { const subj = findSubject(doc, uri.includes('#') ? uri.split('#')[1] : null); const v = readPred(subj, pred); GET_CACHE.set(key, v == null ? '#PRED' : v) }
   } catch (e) { GET_CACHE.set(key, '#GET!') }
   GET_PENDING.delete(key)
@@ -233,26 +235,50 @@ async function createSheet(name) {
   const slug = slugify(name); if (!slug) throw new Error('Enter a name')
   const url = `${storage}public/sheet/${slug}.jsonld`
   await ensureContainer(`${storage}public/`).catch(() => {}); await ensureContainer(`${storage}public/sheet/`).catch(() => {})
-  await putJsonLd(url, sheetDoc(name, {}))
+  await putJsonLd(url, emptyDoc(name))
   const ti = await fetchTypeIndex(webid); if (ti) await addTypeRegistration(ti.typeIndexUrl, { forClass: SHEET_CLASS, instance: url + '#this' })
   return url
 }
-function sheetDoc(name, cells) {
-  return { '@context': { schema: 'https://schema.org/', urn: 'urn:solid:' }, '@id': '#this', '@type': 'urn:Spreadsheet', 'schema:name': name, cols: COLS, rows: ROWS, cells }
+function emptyDoc(name) {
+  return { '@context': { schema: 'https://schema.org/', urn: 'urn:solid:' }, '@graph': [{ '@id': '#this', '@type': 'urn:Spreadsheet', 'schema:name': name, cols: COLS, rows: ROWS }] }
+}
+// Each non-empty cell is its own fragment subject (#A1, #B5, …): rdf:value is the
+// materialised value other sheets/apps dereference, tab:src is the raw input we
+// reload for editing. So every cell is an addressable URI on the data web — a
+// step toward TimBL's Tabulator, where you follow your nose from cell to cell.
+function sheetDoc() {
+  recompute()
+  const graph = [{ '@id': '#this', '@type': 'urn:Spreadsheet', 'schema:name': SHEET.name, cols: COLS, rows: ROWS }]
+  for (const ref of Object.keys(SHEET.cells)) {
+    const raw = SHEET.cells[ref]; if (raw == null || raw === '') continue
+    let val; try { val = evalCell(ref) } catch { val = '' }
+    if (typeof val === 'number' && !isFinite(val)) val = '#VAL'
+    graph.push({ '@id': '#' + ref, 'rdf:value': val, 'tab:src': raw })
+  }
+  return { '@context': { schema: 'https://schema.org/', urn: 'urn:solid:', rdf: RDF_NS, tab: TAB_NS }, '@graph': graph }
 }
 async function loadSheet(url) {
   const doc = await getJsonLd(url)
-  const subj = doc ? findSubject(doc, 'this') : {}
+  const graph = doc ? (Array.isArray(doc['@graph']) ? doc['@graph'] : Array.isArray(doc) ? doc : [doc]) : []
+  const meta = graph.find((n) => (n['@id'] || '').endsWith('#this')) || graph[0] || {}
   SHEET.url = url
-  SHEET.name = (subj && (subj['schema:name'] || subj.name)) || nameFromUrl(url)
-  SHEET.cells = (subj && subj.cells && typeof subj.cells === 'object') ? subj.cells : {}
+  SHEET.name = meta['schema:name'] || meta.name || nameFromUrl(url)
+  SHEET.cells = {}
+  if (meta.cells && typeof meta.cells === 'object') { SHEET.cells = { ...meta.cells } }   // legacy blob shape
+  else for (const n of graph) {
+    const m = /#([A-Z]\d+)$/.exec(n['@id'] || '')
+    if (!m) continue
+    const src = n['tab:src'] ?? n[TAB_NS + 'src']
+    const val = valueOf(n['rdf:value'] ?? n[RDF_NS + 'value'])
+    SHEET.cells[m[1]] = src != null ? src : (val != null ? String(val) : '')
+  }
   GET_CACHE.clear(); GET_PENDING.clear()
 }
 let saveTimer = null
 function saveSoon() { clearTimeout(saveTimer); saveTimer = setTimeout(doSave, 800) }
 async function doSave() {
   if (!SHEET.url) return
-  try { await putJsonLd(SHEET.url, sheetDoc(SHEET.name, SHEET.cells)) } catch (e) { toast('Save failed: ' + e.message) }
+  try { await putJsonLd(SHEET.url, sheetDoc()) } catch (e) { toast('Save failed: ' + e.message) }
 }
 
 // =====================================================================
