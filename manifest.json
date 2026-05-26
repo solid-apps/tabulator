@@ -1,0 +1,14 @@
+{
+  "name": "tabulator",
+  "short_name": "tabulator",
+  "description": "A tiny linked-data spreadsheet on your pod — sums + arithmetic plus =GET(uri,predicate) to pull live values from the data web.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#2a3140",
+  "theme_color": "#2a3140",
+  "handles": [],
+  "icons": [
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
